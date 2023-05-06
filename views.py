@@ -1,4 +1,7 @@
-
+import os
+os.environ["GEVENT_SUPPORT"] = "True"
+from gevent import monkey
+monkey.patch_all()
 
 from flask import Flask, jsonify, request
 from flask_caching import Cache
@@ -8,6 +11,14 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import logging
 from flask_cors import CORS
+from lxml import html
+from gevent import monkey
+from functools import lru_cache
+import re
+import requests
+import asyncio
+import httpx
+
 
 
 
@@ -16,9 +27,10 @@ app = Flask(__name__)
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["1 per 1 second", "100 per 1 second"],
+    default_limits=["200 per 1 second", "300 per 1 second"],
     storage_uri="memory://",
 )
+
 
 
 CORS(app)
@@ -32,22 +44,35 @@ cache = Cache(app, config={'CACHE_TYPE': 'simple', 'CACHE_KEY_PREFIX': '3Speakvi
 
 
 
-@cache.memoize(timeout=60)
-def get_3speak_views(video_id):
+async def get_3speak_views_async(video_id):
     url = f'https://3speak.tv/watch?v={video_id}'
+    views = None
+
     for i in range(3):
         try:
-            page = requests.get(url)
-            soup = BeautifulSoup(page.content, 'html.parser')
+            limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+
+            soup = BeautifulSoup(response.content, 'html.parser')
             result = soup.find('span', class_="mr-1")
+
             if result:
                 views = result.text.strip()
                 views = views.replace('<i class="fas fa-eye"></i>', '').strip()
-                return int(views)
+                
+                 # Extraer solo números del texto
+
+                if int(views):  # Verificar si el valor extraído es un número
+                    break
         except Exception as e:
             print("Error fetching views:", e)
-    return None
-    
+    return int(views)
+
+
+def get_3speak_views(video_id):
+    return asyncio.run(get_3speak_views_async(video_id))
+
 
 @app.route('/')
 def api_info():
@@ -58,19 +83,18 @@ def api_info():
     '''
 
 @app.route('/views', methods=['GET'])
-@limiter.limit("10/second", override_defaults=False)
+@limiter.limit("100/second", override_defaults=False)
 def get_views():
     video_id = request.args.get('id', type=str)
     if not video_id:
         return jsonify({"error": "The video ID is required."}), 400
 
-    url = video_id
-    url = str(url)
-    views = get_3speak_views(url)
+    views = get_3speak_views(video_id)
     if views is None:
         return jsonify({"error": "Could not fetch the number of views."}), 500
 
     return jsonify({"views": views})
+
 
 @app.errorhandler(404)
 def not_found(e):
@@ -85,4 +109,5 @@ def handle_exception(e):
 
 
 if __name__ == '__main__':
-    app.run(debug=False)
+    app.debug = True
+    app.run()
